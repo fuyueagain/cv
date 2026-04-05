@@ -5,13 +5,18 @@ from typing import Any, Literal, Optional
 import cv2
 import mediapipe as mp
 
+try:
+    import serial
+except ImportError:  # pragma: no cover - depends on runtime environment
+    serial = None
 
-TargetGesture = Literal["OK", "POINT_LEFT", "POINT_RIGHT"]
+
+TargetGesture = Literal["OK", "LEFT", "RIGHT"]
 
 
 OK: TargetGesture = "OK"
-POINT_LEFT: TargetGesture = "POINT_LEFT"
-POINT_RIGHT: TargetGesture = "POINT_RIGHT"
+LEFT: TargetGesture = "LEFT"
+RIGHT: TargetGesture = "RIGHT"
 
 
 CAMERA_INDEX = 0
@@ -22,10 +27,15 @@ MIN_DETECTION_CONFIDENCE = 0.7
 MIN_TRACKING_CONFIDENCE = 0.6
 POLL_INTERVAL_SECONDS = 0.01
 DETECTION_TIMEOUT_SECONDS = 10.0
+UART_DEVICE = "/dev/ttyS1"
+UART_BAUDRATE = 115200
+UART_TIMEOUT_SECONDS = 1
+UART_APPEND_NEWLINE = True
 
 
 _cap: Optional[Any] = None
 _hands: Optional[Any] = None
+_uart: Optional[Any] = None
 _last_detection_elapsed_seconds: Optional[float] = None
 
 
@@ -48,8 +58,8 @@ def _classify(lm) -> Optional[TargetGesture]:
         return OK
     if index_ext and not mid_ext and not ring_ext and not pinky_ext:
         if lm[8].x < lm[0].x:
-            return POINT_LEFT
-        return POINT_RIGHT
+            return LEFT
+        return RIGHT
     return None
 
 
@@ -80,6 +90,37 @@ def _initialize_resources() -> None:
         _hands = _create_hands()
 
 
+def _initialize_uart() -> None:
+    global _uart
+
+    if _uart is not None:
+        return
+
+    if serial is None:
+        raise RuntimeError("未安装 pyserial，无法通过 UART 发送手势结果。")
+
+    _uart = serial.Serial(
+        port=UART_DEVICE,
+        baudrate=UART_BAUDRATE,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=UART_TIMEOUT_SECONDS,
+        write_timeout=UART_TIMEOUT_SECONDS,
+    )
+
+
+def _send_gesture_uart(gesture: TargetGesture) -> None:
+    _initialize_uart()
+
+    if _uart is None:
+        raise RuntimeError("串口尚未初始化。")
+
+    payload = gesture if not UART_APPEND_NEWLINE else f"{gesture}\n"
+    _uart.write(payload.encode("ascii"))
+    _uart.flush()
+
+
 def _detect_target_gesture(frame) -> Optional[TargetGesture]:
     if frame is None:
         return None
@@ -104,14 +145,14 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
 
     行为：
     - 首次调用时自动初始化摄像头和 MediaPipe Hands。
-    - 持续循环检测，同一目标手势连续两帧命中后返回。
+    - 持续循环检测，同一目标手势连续两帧命中后，通过 UART 发送并返回。
     - 检测过程中对未检测到手部、其他手势、手势不明确均静默忽略。
 
     参数：
     - timeout: 最大等待秒数，默认 10 秒。超时后抛出 TimeoutError。
 
     返回值：
-    - "OK" | "POINT_LEFT" | "POINT_RIGHT"
+    - "OK" | "LEFT" | "RIGHT"
     """
 
     global _last_detection_elapsed_seconds
@@ -127,7 +168,7 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
     while True:
         if time.monotonic() - start_time >= timeout:
             raise TimeoutError(
-                f"在 {timeout:.2f} 秒内未检测到 OK / POINT_LEFT / POINT_RIGHT"
+                f"在 {timeout:.2f} 秒内未检测到 OK / LEFT / RIGHT"
             )
 
         if _cap is None:
@@ -146,6 +187,7 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
 
         if gesture == previous_gesture:
             _last_detection_elapsed_seconds = time.monotonic() - start_time
+            _send_gesture_uart(gesture)
             return gesture
 
         previous_gesture = gesture
@@ -154,10 +196,10 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
 
 def release_camera() -> None:
     """
-    释放摄像头和 MediaPipe Hands 检测器资源。
+    释放摄像头、MediaPipe Hands 检测器和 UART 资源。
     """
 
-    global _cap, _hands, _last_detection_elapsed_seconds
+    global _cap, _hands, _uart, _last_detection_elapsed_seconds
 
     if _cap is not None:
         _cap.release()
@@ -166,6 +208,10 @@ def release_camera() -> None:
     if _hands is not None:
         _hands.close()
         _hands = None
+
+    if _uart is not None:
+        _uart.close()
+        _uart = None
 
     _last_detection_elapsed_seconds = None
 
