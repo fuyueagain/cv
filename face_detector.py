@@ -52,14 +52,22 @@ UART_BAUDRATE = 115200
 START_SIGNAL = "START\n"
 
 
-def send_start_signal(port=UART_PORT, baudrate=UART_BAUDRATE, log=True):
+def send_start_signal(
+    port=UART_PORT,
+    baudrate=UART_BAUDRATE,
+    log=True,
+    expect_loopback=False,
+):
     """
     按 RDK X5 官方 UART 测试方式发送 START 信号。
 
     :param port: 串口设备名，RDK X5 默认 /dev/ttyS1
     :param baudrate: 波特率，默认 115200
     :param log: 是否打印日志
+    :param expect_loopback: 是否读取回环数据并校验
+    :return: bool，发送成功且回环校验通过时返回 True
     """
+    payload = START_SIGNAL.encode("ascii")
     ser = serial.Serial(
         port=port,
         baudrate=baudrate,
@@ -71,14 +79,40 @@ def send_start_signal(port=UART_PORT, baudrate=UART_BAUDRATE, log=True):
     )
 
     try:
-        ser.write(START_SIGNAL.encode("ascii"))
+        ser.write(payload)
         ser.flush()
         if log:
             print(f"[UART] Sent: {START_SIGNAL.strip()}")
+
+        if not expect_loopback:
+            return True
+
+        echoed = ser.read(len(payload)).decode("ascii", errors="ignore")
+        if log:
+            print(f"[UART] Recv: {echoed.strip()}")
+
+        return echoed == START_SIGNAL
     finally:
         ser.close()
         if log:
             print("[UART] 串口已关闭。")
+
+
+def test_start_signal_loopback(port=UART_PORT, baudrate=UART_BAUDRATE, log=True):
+    """
+    在 TX/RX 短接场景下测试 START 串口回环是否正常。
+
+    :param port: 串口设备名，默认 /dev/ttyS1
+    :param baudrate: 波特率，默认 115200
+    :param log: 是否打印日志
+    :return: bool，回环通过返回 True
+    """
+    return send_start_signal(
+        port=port,
+        baudrate=baudrate,
+        log=log,
+        expect_loopback=True,
+    )
 
 
 def wait_for_face_trigger(
@@ -86,6 +120,7 @@ def wait_for_face_trigger(
     target_width=150,
     serial_port=UART_PORT,
     baudrate=UART_BAUDRATE,
+    verify_loopback=False,
     read_fail_sleep=0.1,
     flush_frame_count=5,
     cooldown=3.0,
@@ -98,6 +133,7 @@ def wait_for_face_trigger(
     :param target_width: 人脸宽度触发阈值
     :param serial_port: 串口设备名，默认 /dev/ttyS1
     :param baudrate: 串口波特率，默认 115200
+    :param verify_loopback: 是否校验回环接收结果
     :param read_fail_sleep: 抓帧失败后的等待时间
     :param flush_frame_count: 触发后清理缓存帧数量
     :param cooldown: 触发后的防抖时间
@@ -132,7 +168,14 @@ def wait_for_face_trigger(
             if log:
                 print("[SIGNAL] 触发！用户已到达最佳交互距离。")
 
-            send_start_signal(port=serial_port, baudrate=baudrate, log=log)
+            serial_ok = send_start_signal(
+                port=serial_port,
+                baudrate=baudrate,
+                log=log,
+                expect_loopback=verify_loopback,
+            )
+            if verify_loopback and not serial_ok:
+                raise RuntimeError("串口 START 回环校验失败，请检查 8(TXD) 与 10(RXD) 接线和波特率配置。")
             time.sleep(cooldown)
             for _ in range(flush_frame_count):
                 cap.read()
