@@ -1,6 +1,7 @@
 import time
 
 import cv2
+import serial
 
 
 class FaceProximityDetector:
@@ -46,9 +47,45 @@ class FaceProximityDetector:
         return is_triggered
 
 
+UART_PORT = "/dev/ttyS1"
+UART_BAUDRATE = 115200
+START_SIGNAL = "START\n"
+
+
+def send_start_signal(port=UART_PORT, baudrate=UART_BAUDRATE, log=True):
+    """
+    按 RDK X5 官方 UART 测试方式发送 START 信号。
+
+    :param port: 串口设备名，RDK X5 默认 /dev/ttyS1
+    :param baudrate: 波特率，默认 115200
+    :param log: 是否打印日志
+    """
+    ser = serial.Serial(
+        port=port,
+        baudrate=baudrate,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=1,
+        write_timeout=1,
+    )
+
+    try:
+        ser.write(START_SIGNAL.encode("ascii"))
+        ser.flush()
+        if log:
+            print(f"[UART] Sent: {START_SIGNAL.strip()}")
+    finally:
+        ser.close()
+        if log:
+            print("[UART] 串口已关闭。")
+
+
 def wait_for_face_trigger(
     camera_index=0,
     target_width=150,
+    serial_port=UART_PORT,
+    baudrate=UART_BAUDRATE,
     read_fail_sleep=0.1,
     flush_frame_count=5,
     cooldown=3.0,
@@ -59,6 +96,8 @@ def wait_for_face_trigger(
 
     :param camera_index: 摄像头索引
     :param target_width: 人脸宽度触发阈值
+    :param serial_port: 串口设备名，默认 /dev/ttyS1
+    :param baudrate: 串口波特率，默认 115200
     :param read_fail_sleep: 抓帧失败后的等待时间
     :param flush_frame_count: 触发后清理缓存帧数量
     :param cooldown: 触发后的防抖时间
@@ -93,6 +132,7 @@ def wait_for_face_trigger(
             if log:
                 print("[SIGNAL] 触发！用户已到达最佳交互距离。")
 
+            send_start_signal(port=serial_port, baudrate=baudrate, log=log)
             time.sleep(cooldown)
             for _ in range(flush_frame_count):
                 cap.read()
