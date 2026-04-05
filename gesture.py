@@ -21,10 +21,12 @@ MIRROR_INPUT = True
 MIN_DETECTION_CONFIDENCE = 0.7
 MIN_TRACKING_CONFIDENCE = 0.6
 POLL_INTERVAL_SECONDS = 0.01
+DETECTION_TIMEOUT_SECONDS = 10.0
 
 
 _cap: Optional[Any] = None
 _hands: Optional[Any] = None
+_last_detection_elapsed_seconds: Optional[float] = None
 
 
 def _finger_extended(lm, tip: int, pip_idx: int) -> bool:
@@ -96,30 +98,34 @@ def _detect_target_gesture(frame) -> Optional[TargetGesture]:
     return _classify(landmarks)
 
 
-def detect_gesture(timeout: Optional[float] = None) -> TargetGesture:
+def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
     """
     阻塞式手势检测函数。
 
     行为：
     - 首次调用时自动初始化摄像头和 MediaPipe Hands。
-    - 持续循环检测，直到识别到 OK / POINT_LEFT / POINT_RIGHT 之一。
+    - 持续循环检测，同一目标手势连续两帧命中后返回。
     - 检测过程中对未检测到手部、其他手势、手势不明确均静默忽略。
 
     参数：
-    - timeout: 最大等待秒数。超时后抛出 TimeoutError。
+    - timeout: 最大等待秒数，默认 10 秒。超时后抛出 TimeoutError。
 
     返回值：
     - "OK" | "POINT_LEFT" | "POINT_RIGHT"
     """
 
-    if timeout is not None and timeout <= 0:
+    global _last_detection_elapsed_seconds
+
+    if timeout <= 0:
         raise ValueError("timeout must be greater than 0")
 
     _initialize_resources()
-    deadline = None if timeout is None else time.monotonic() + timeout
+    start_time = time.monotonic()
+    previous_gesture: Optional[TargetGesture] = None
+    _last_detection_elapsed_seconds = None
 
     while True:
-        if deadline is not None and time.monotonic() >= deadline:
+        if time.monotonic() - start_time >= timeout:
             raise TimeoutError(
                 f"在 {timeout:.2f} 秒内未检测到 OK / POINT_LEFT / POINT_RIGHT"
             )
@@ -133,9 +139,16 @@ def detect_gesture(timeout: Optional[float] = None) -> TargetGesture:
             continue
 
         gesture = _detect_target_gesture(frame)
-        if gesture is not None:
+        if gesture is None:
+            previous_gesture = None
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        if gesture == previous_gesture:
+            _last_detection_elapsed_seconds = time.monotonic() - start_time
             return gesture
 
+        previous_gesture = gesture
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -144,7 +157,7 @@ def release_camera() -> None:
     释放摄像头和 MediaPipe Hands 检测器资源。
     """
 
-    global _cap, _hands
+    global _cap, _hands, _last_detection_elapsed_seconds
 
     if _cap is not None:
         _cap.release()
@@ -154,9 +167,21 @@ def release_camera() -> None:
         _hands.close()
         _hands = None
 
+    _last_detection_elapsed_seconds = None
+
+
+def get_last_detection_elapsed() -> Optional[float]:
+    """
+    返回最近一次成功识别目标手势的耗时秒数。
+    """
+
+    return _last_detection_elapsed_seconds
+
 
 if __name__ == "__main__":
     try:
         print(detect_gesture())
+    except TimeoutError:
+        pass
     finally:
         release_camera()
