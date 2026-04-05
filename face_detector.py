@@ -1,186 +1,214 @@
 import time
+from typing import Any, Literal, Optional
 
 import cv2
-import serial
+
+try:
+    import serial
+except ImportError:  # pragma: no cover - depends on runtime environment
+    serial = None
 
 
-class FaceProximityDetector:
-    def __init__(self, default_target_w=250):
-        """
-        初始化测距模块
-        :param default_target_w: 默认的触发像素宽度，默认值为150px
-        """
-        self.default_target_w = default_target_w
-
-        # 初始化模型池，避免在每一帧处理时重复加载模型。
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
-        if self.face_cascade.empty():
-            raise RuntimeError(f"无法加载 Haar 模型: {cascade_path}")
-
-    def process_frame(self, frame, custom_target_w=None):
-        """
-        处理单帧图像，输出触发信号
-        :param frame: 摄像头读取的单帧图像
-        :param custom_target_w: 供外部动态修改触发阈值。如果不传，则使用默认值
-        :return: is_triggered
-                 bool 信号，距离达标时为 True
-        """
-        active_target_w = custom_target_w if custom_target_w is not None else self.default_target_w
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(50, 50),
-        )
-
-        if len(faces) == 0:
-            return False
-
-        # 只关心最靠近镜头的人脸。
-        largest_face = max(faces, key=lambda rect: rect[2])
-        _, _, w, _ = largest_face
-        is_triggered = w >= active_target_w
-
-        return is_triggered
+FaceSignal = Literal["START"]
 
 
-UART_PORT = "/dev/ttyS1"
+START: FaceSignal = "START"
+
+
+CAMERA_INDEX = 0
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
+TARGET_FACE_WIDTH = 150
+POLL_INTERVAL_SECONDS = 0.01
+DETECTION_TIMEOUT_SECONDS = 10.0
+DETECTION_SCALE_FACTOR = 1.1
+DETECTION_MIN_NEIGHBORS = 5
+DETECTION_MIN_SIZE = (50, 50)
+UART_DEVICE = "/dev/ttyS1"
 UART_BAUDRATE = 115200
-START_SIGNAL = "START\n"
+UART_TIMEOUT_SECONDS = 1
+UART_APPEND_NEWLINE = True
 
 
-def send_start_signal(
-    port=UART_PORT,
-    baudrate=UART_BAUDRATE,
-    log=True,
-    expect_loopback=False,
-):
-    """
-    按 RDK X5 官方 UART 测试方式发送 START 信号。
+_cap: Optional[Any] = None
+_face_cascade: Optional[Any] = None
+_uart: Optional[Any] = None
+_last_detection_elapsed_seconds: Optional[float] = None
 
-    :param port: 串口设备名，RDK X5 默认 /dev/ttyS1
-    :param baudrate: 波特率，默认 115200
-    :param log: 是否打印日志
-    :param expect_loopback: 是否读取回环数据并校验
-    :return: bool，发送成功且回环校验通过时返回 True
-    """
-    payload = START_SIGNAL.encode("ascii")
-    ser = serial.Serial(
-        port=port,
-        baudrate=baudrate,
+
+def _create_face_cascade():
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+    if face_cascade.empty():
+        raise RuntimeError(f"无法加载 Haar 模型: {cascade_path}")
+    return face_cascade
+
+
+def _initialize_resources() -> None:
+    global _cap, _face_cascade
+
+    if _cap is None:
+        _cap = cv2.VideoCapture(CAMERA_INDEX)
+        _cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+        _cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+
+        if not _cap.isOpened():
+            release_camera()
+            raise RuntimeError(
+                f"无法打开摄像头索引 {CAMERA_INDEX}，请检查 /dev/video*"
+            )
+
+    if _face_cascade is None:
+        _face_cascade = _create_face_cascade()
+
+
+def _initialize_uart() -> None:
+    global _uart
+
+    if _uart is not None:
+        return
+
+    if serial is None:
+        raise RuntimeError("未安装 pyserial，无法通过 UART 发送人脸信号。")
+
+    _uart = serial.Serial(
+        port=UART_DEVICE,
+        baudrate=UART_BAUDRATE,
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
-        timeout=1,
-        write_timeout=1,
-    )
-
-    try:
-        ser.write(payload)
-        ser.flush()
-        if log:
-            print(f"[UART] Sent: {START_SIGNAL.strip()}")
-
-        if not expect_loopback:
-            return True
-
-        echoed = ser.read(len(payload)).decode("ascii", errors="ignore")
-        if log:
-            print(f"[UART] Recv: {echoed.strip()}")
-
-        return echoed == START_SIGNAL
-    finally:
-        ser.close()
-        if log:
-            print("[UART] 串口已关闭。")
-
-
-def test_start_signal_loopback(port=UART_PORT, baudrate=UART_BAUDRATE, log=True):
-    """
-    在 TX/RX 短接场景下测试 START 串口回环是否正常。
-
-    :param port: 串口设备名，默认 /dev/ttyS1
-    :param baudrate: 波特率，默认 115200
-    :param log: 是否打印日志
-    :return: bool，回环通过返回 True
-    """
-    return send_start_signal(
-        port=port,
-        baudrate=baudrate,
-        log=log,
-        expect_loopback=True,
+        timeout=UART_TIMEOUT_SECONDS,
+        write_timeout=UART_TIMEOUT_SECONDS,
     )
 
 
-def wait_for_face_trigger(
-    camera_index=0,
-    target_width=150,
-    serial_port=UART_PORT,
-    baudrate=UART_BAUDRATE,
-    verify_loopback=False,
-    read_fail_sleep=0.1,
-    flush_frame_count=5,
-    cooldown=3.0,
-    log=True,
-):
+def _send_face_uart(signal: FaceSignal) -> None:
+    _initialize_uart()
+
+    if _uart is None:
+        raise RuntimeError("串口尚未初始化。")
+
+    payload = signal if not UART_APPEND_NEWLINE else f"{signal}\n"
+    _uart.write(payload.encode("ascii"))
+    _uart.flush()
+
+
+def _detect_face_trigger(frame, target_width: int = TARGET_FACE_WIDTH) -> bool:
+    if frame is None:
+        return False
+
+    if _face_cascade is None:
+        raise RuntimeError("人脸检测器尚未初始化。")
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = _face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=DETECTION_SCALE_FACTOR,
+        minNeighbors=DETECTION_MIN_NEIGHBORS,
+        minSize=DETECTION_MIN_SIZE,
+    )
+
+    if len(faces) == 0:
+        return False
+
+    largest_face = max(faces, key=lambda rect: rect[2])
+    _, _, face_width, _ = largest_face
+    return face_width >= target_width
+
+
+def detect_face(
+    timeout: float = DETECTION_TIMEOUT_SECONDS,
+    target_width: int = TARGET_FACE_WIDTH,
+) -> FaceSignal:
     """
-    打开摄像头并持续检测人脸距离，达到阈值后返回触发信号。
+    阻塞式人脸检测函数。
 
-    :param camera_index: 摄像头索引
-    :param target_width: 人脸宽度触发阈值
-    :param serial_port: 串口设备名，默认 /dev/ttyS1
-    :param baudrate: 串口波特率，默认 115200
-    :param verify_loopback: 是否校验回环接收结果
-    :param read_fail_sleep: 抓帧失败后的等待时间
-    :param flush_frame_count: 触发后清理缓存帧数量
-    :param cooldown: 触发后的防抖时间
-    :param log: 是否打印日志
-    :return: is_triggered
-             bool，达到阈值时为 True
+    行为：
+    - 首次调用时自动初始化摄像头和 Haar 人脸检测器。
+    - 持续循环检测，同一触发条件连续两帧命中后，通过 UART 发送并返回 START。
+    - 未检测到人脸、距离未达阈值时均静默忽略。
+
+    参数：
+    - timeout: 最大等待秒数，默认 10 秒。超时后抛出 TimeoutError。
+    - target_width: 人脸宽度触发阈值，默认 150 像素。
+
+    返回值：
+    - "START"
     """
-    if log:
-        print(f"[System] 初始化摄像头 /dev/video{camera_index} ...")
 
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise RuntimeError(f"无法打开摄像头索引 {camera_index}，请检查 /dev/video 节点！")
+    global _last_detection_elapsed_seconds
 
-    detector = FaceProximityDetector(default_target_w=target_width)
-    if log:
-        print("[System] 视觉检测模块已加载，等待用户靠近...")
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than 0")
+    if target_width <= 0:
+        raise ValueError("target_width must be greater than 0")
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                if log:
-                    print("[Warn] 抓帧失败，稍后重试...")
-                time.sleep(read_fail_sleep)
-                continue
+    _initialize_resources()
+    start_time = time.monotonic()
+    previous_triggered = False
+    _last_detection_elapsed_seconds = None
 
-            is_triggered = detector.process_frame(frame)
-            if not is_triggered:
-                continue
-
-            if log:
-                print("[SIGNAL] 触发！用户已到达最佳交互距离。")
-
-            serial_ok = send_start_signal(
-                port=serial_port,
-                baudrate=baudrate,
-                log=log,
-                expect_loopback=verify_loopback,
+    while True:
+        if time.monotonic() - start_time >= timeout:
+            raise TimeoutError(
+                f"在 {timeout:.2f} 秒内未检测到达到阈值的人脸"
             )
-            if verify_loopback and not serial_ok:
-                raise RuntimeError("串口 START 回环校验失败，请检查 8(TXD) 与 10(RXD) 接线和波特率配置。")
-            time.sleep(cooldown)
-            for _ in range(flush_frame_count):
-                cap.read()
-            return True
+
+        if _cap is None:
+            raise RuntimeError("摄像头尚未初始化。")
+
+        ret, frame = _cap.read()
+        if not ret:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        triggered = _detect_face_trigger(frame, target_width=target_width)
+        if not triggered:
+            previous_triggered = False
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        if previous_triggered:
+            _last_detection_elapsed_seconds = time.monotonic() - start_time
+            _send_face_uart(START)
+            return START
+
+        previous_triggered = True
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def release_camera() -> None:
+    """
+    释放摄像头、人脸检测器和 UART 资源。
+    """
+
+    global _cap, _face_cascade, _uart, _last_detection_elapsed_seconds
+
+    if _cap is not None:
+        _cap.release()
+        _cap = None
+
+    _face_cascade = None
+
+    if _uart is not None:
+        _uart.close()
+        _uart = None
+
+    _last_detection_elapsed_seconds = None
+
+
+def get_last_detection_elapsed() -> Optional[float]:
+    """
+    返回最近一次成功识别人脸触发的耗时秒数。
+    """
+
+    return _last_detection_elapsed_seconds
+
+
+if __name__ == "__main__":
+    try:
+        print(detect_face())
+    except TimeoutError:
+        pass
     finally:
-        cap.release()
-        if log:
-            print("[System] 摄像头已释放。")
+        release_camera()

@@ -9,7 +9,7 @@ import serial
 DEFAULT_PORT = "/dev/ttyS1"
 DEFAULT_BAUDRATE = 115200
 DEFAULT_TIMEOUT = 1.0
-VALID_MESSAGES = {"OK", "LEFT", "RIGHT"}
+VALID_MESSAGES = {"OK", "LEFT", "RIGHT","START"}
 
 
 def parse_args():
