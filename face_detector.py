@@ -5,7 +5,7 @@ import serial
 
 
 class FaceProximityDetector:
-    def __init__(self, default_target_w=150):
+    def __init__(self, default_target_w=250):
         """
         初始化测距模块
         :param default_target_w: 默认的触发像素宽度，默认值为150px
