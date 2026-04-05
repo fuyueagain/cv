@@ -6,9 +6,6 @@ PORT = "/dev/ttyS1"
 BAUDRATE = 115200
 
 COMMAND_MAP = {
-    "1": "LEFT\n",
-    "2": "RIGHT\n",
-    "3": "OK\n",
     "LEFT": "LEFT\n",
     "RIGHT": "RIGHT\n",
     "OK": "OK\n",
@@ -27,7 +24,7 @@ def main():
     )
 
     print(f"[RDK] UART opened: {PORT} @ {BAUDRATE}, 8N1")
-    print("[RDK] 输入 1/2/3 或 LEFT/RIGHT/OK，输入 q 退出")
+    print("[RDK] 输入 LEFT / RIGHT / OK，输入 q 退出")
 
     try:
         while True:
@@ -37,7 +34,7 @@ def main():
 
             payload = COMMAND_MAP.get(cmd)
             if payload is None:
-                print("无效输入，请输入 1/2/3/LEFT/RIGHT/OK/q")
+                print("无效输入，请输入 LEFT / RIGHT / OK / q")
                 continue
 
             ser.write(payload.encode("ascii"))
@@ -50,4 +47,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-v
