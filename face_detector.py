@@ -1,5 +1,5 @@
 import time
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import cv2
 
@@ -119,18 +119,23 @@ def _detect_face_trigger(frame, target_width: int = TARGET_FACE_WIDTH) -> bool:
 def detect_face(
     timeout: float = DETECTION_TIMEOUT_SECONDS,
     target_width: int = TARGET_FACE_WIDTH,
+    emit_uart: bool = True,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> FaceSignal:
     """
     阻塞式人脸检测函数。
 
     行为：
     - 首次调用时自动初始化摄像头和 Haar 人脸检测器。
-    - 持续循环检测，同一触发条件连续两帧命中后，通过 UART 发送并返回 START。
+    - 持续循环检测，同一触发条件连续两帧命中后返回 START。
+    - emit_uart=True 时，识别成功后会通过 UART 发送 START。
     - 未检测到人脸、距离未达阈值时均静默忽略。
 
     参数：
     - timeout: 最大等待秒数，默认 10 秒。超时后抛出 TimeoutError。
     - target_width: 人脸宽度触发阈值，默认 150 像素。
+    - emit_uart: 是否在识别成功后通过 UART 发送 START，默认发送。
+    - should_stop: 可选的停止回调，返回 True 时立刻中断检测。
 
     返回值：
     - "START"
@@ -149,6 +154,9 @@ def detect_face(
     _last_detection_elapsed_seconds = None
 
     while True:
+        if should_stop is not None and should_stop():
+            raise InterruptedError("人脸检测已被上层停止。")
+
         if time.monotonic() - start_time >= timeout:
             raise TimeoutError(
                 f"在 {timeout:.2f} 秒内未检测到达到阈值的人脸"
@@ -170,7 +178,8 @@ def detect_face(
 
         if previous_triggered:
             _last_detection_elapsed_seconds = time.monotonic() - start_time
-            _send_face_uart(START)
+            if emit_uart:
+                _send_face_uart(START)
             return START
 
         previous_triggered = True

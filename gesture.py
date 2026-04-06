@@ -1,6 +1,6 @@
 import math
 import time
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import cv2
 import mediapipe as mp
@@ -27,6 +27,7 @@ MIN_DETECTION_CONFIDENCE = 0.7
 MIN_TRACKING_CONFIDENCE = 0.6
 POLL_INTERVAL_SECONDS = 0.01
 DETECTION_TIMEOUT_SECONDS = 10.0
+OK_HOLD_SECONDS = 0.8
 UART_DEVICE = "/dev/ttyS1"
 UART_BAUDRATE = 115200
 UART_TIMEOUT_SECONDS = 1
@@ -139,17 +140,26 @@ def _detect_target_gesture(frame) -> Optional[TargetGesture]:
     return _classify(landmarks)
 
 
-def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
+def detect_gesture(
+    timeout: float = DETECTION_TIMEOUT_SECONDS,
+    ok_hold_seconds: float = OK_HOLD_SECONDS,
+    emit_uart: bool = True,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> TargetGesture:
     """
     阻塞式手势检测函数。
 
     行为：
     - 首次调用时自动初始化摄像头和 MediaPipe Hands。
-    - 持续循环检测，同一目标手势连续两帧命中后，通过 UART 发送并返回。
+    - 持续循环检测，同一目标手势连续两帧命中后返回。
+    - emit_uart=True 时，识别成功后会通过 UART 发送手势信号。
     - 检测过程中对未检测到手部、其他手势、手势不明确均静默忽略。
 
     参数：
     - timeout: 最大等待秒数，默认 10 秒。超时后抛出 TimeoutError。
+    - ok_hold_seconds: OK 手势最短稳定保持时长，默认 0.8 秒。
+    - emit_uart: 是否在识别成功后通过 UART 发送结果，默认发送。
+    - should_stop: 可选的停止回调，返回 True 时立刻中断检测。
 
     返回值：
     - "OK" | "LEFT" | "RIGHT"
@@ -159,13 +169,19 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
 
     if timeout <= 0:
         raise ValueError("timeout must be greater than 0")
+    if ok_hold_seconds < 0:
+        raise ValueError("ok_hold_seconds must not be negative")
 
     _initialize_resources()
     start_time = time.monotonic()
     previous_gesture: Optional[TargetGesture] = None
+    current_gesture_started_at: Optional[float] = None
     _last_detection_elapsed_seconds = None
 
     while True:
+        if should_stop is not None and should_stop():
+            raise InterruptedError("手势检测已被上层停止。")
+
         if time.monotonic() - start_time >= timeout:
             raise TimeoutError(
                 f"在 {timeout:.2f} 秒内未检测到 OK / LEFT / RIGHT"
@@ -182,15 +198,24 @@ def detect_gesture(timeout: float = DETECTION_TIMEOUT_SECONDS) -> TargetGesture:
         gesture = _detect_target_gesture(frame)
         if gesture is None:
             previous_gesture = None
+            current_gesture_started_at = None
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
         if gesture == previous_gesture:
+            if gesture == OK and current_gesture_started_at is not None:
+                held_seconds = time.monotonic() - current_gesture_started_at
+                if held_seconds < ok_hold_seconds:
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+
             _last_detection_elapsed_seconds = time.monotonic() - start_time
-            _send_gesture_uart(gesture)
+            if emit_uart:
+                _send_gesture_uart(gesture)
             return gesture
 
         previous_gesture = gesture
+        current_gesture_started_at = time.monotonic()
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
